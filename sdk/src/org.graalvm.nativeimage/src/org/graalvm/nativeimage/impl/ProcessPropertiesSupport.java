@@ -40,13 +40,16 @@
  */
 package org.graalvm.nativeimage.impl;
 
+import java.net.URL;
 import java.nio.file.Path;
 
 import org.graalvm.nativeimage.c.function.CEntryPointLiteral;
 
 public interface ProcessPropertiesSupport {
-    default String getExecutableName() {
-        return "java";
+    String getExecutableName();
+
+    default URL getExecutableURL() {
+        return null;
     }
 
     long getProcessID();

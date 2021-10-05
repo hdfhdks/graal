@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,7 +26,6 @@ package com.oracle.svm.core.hub;
 
 //Checkstyle: allow reflection
 
-import java.io.File;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.lang.annotation.Annotation;
@@ -43,7 +42,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.CodeSource;
 import java.security.ProtectionDomain;
@@ -58,10 +56,11 @@ import java.util.StringJoiner;
 import org.graalvm.compiler.core.common.NumUtil;
 import org.graalvm.compiler.core.common.SuppressFBWarnings;
 import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
+import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.ProcessProperties;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
+import org.graalvm.nativeimage.impl.ProcessPropertiesSupport;
 import org.graalvm.util.DirectAnnotationAccess;
 
 import com.oracle.svm.core.RuntimeAssertionsSupport;
@@ -336,16 +335,12 @@ public final class DynamicHub implements JavaKind.FormatWithToString, AnnotatedE
         java.security.Permissions perms = new java.security.Permissions();
         perms.add(SecurityConstants.ALL_PERMISSION);
         CodeSource cs;
-        try {
-            // Try to use executable image's name as code source for the class.
-            // The file location can be used by Java code to determine its location on disk, similar
-            // to argv[0].
-            cs = new CodeSource(new File(ProcessProperties.getExecutableName()).toURI().toURL(), (Certificate[]) null);
-        } catch (MalformedURLException ex) {
-            // This should not really happen; the file is cannonicalized, absolute, so it should
-            // always have file:// URL.
-            cs = null;
-        }
+
+        // Try to use executable image's name as code source for the class.
+        // The file location can be used by Java code to determine its location on disk, similar
+        // to argv[0].
+        cs = new CodeSource(ImageSingletons.lookup(ProcessPropertiesSupport.class).getExecutableURL(), (Certificate[]) null);
+
         return new java.security.ProtectionDomain(cs, perms);
     });
 
