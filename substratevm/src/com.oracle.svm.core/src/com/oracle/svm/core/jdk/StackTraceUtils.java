@@ -368,6 +368,7 @@ class StackAccessControlContextVisitor extends JavaStackFrameVisitor {
     }
 
     @NeverInline("Starting a stack walk in the caller frame")
+    @SuppressWarnings({"deprecation"}) // deprecated starting JDK 17
     public static AccessControlContext getFromStack() {
         if (!CEntryPointSnippets.isIsolateInitialized()) {
             Permissions perms = new Permissions();

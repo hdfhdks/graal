@@ -135,6 +135,7 @@ final class Target_java_security_AccessController {
 
     @Substitute
     @TargetElement(onlyWith = JDK14OrLater.class)
+    @SuppressWarnings("deprecation") // deprecated starting JDK 17
     static <T> T executePrivileged(PrivilegedExceptionAction<T> action, AccessControlContext context, Class<?> caller) throws Throwable {
         if (action == null) {
             throw new NullPointerException("Null action");
@@ -156,6 +157,7 @@ final class Target_java_security_AccessController {
 
     @Substitute
     @TargetElement(onlyWith = JDK14OrLater.class)
+    @SuppressWarnings("deprecation") // deprecated starting JDK 17
     static <T> T executePrivileged(PrivilegedAction<T> action, AccessControlContext context, Class<?> caller) throws Throwable {
         if (action == null) {
             throw new NullPointerException("Null action");
@@ -189,7 +191,7 @@ final class Target_java_security_AccessController {
 }
 
 @InternalVMMethod
-@SuppressWarnings("unused")
+@SuppressWarnings({"unused"})
 class AccessControllerUtil {
 
     static final AccessControlContext NO_CONTEXT_SINGLETON;
