@@ -74,6 +74,7 @@ import com.oracle.svm.util.ReflectionUtil;
 
 // Checkstyle: stop
 import sun.security.jca.ProviderList;
+import sun.security.util.Debug;
 import sun.security.util.SecurityConstants;
 // Checkstyle: resume
 
@@ -338,6 +339,11 @@ final class Target_java_security_AccessControlContext {
 
     @Alias
     Target_java_security_AccessControlContext(ProtectionDomain[] context, AccessControlContext privilegedContext) {
+    }
+
+    @Substitute
+    static Debug getDebug() {
+        return null;
     }
 }
 
