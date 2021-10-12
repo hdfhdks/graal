@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,23 +27,7 @@ package com.oracle.svm.core;
 
 import org.graalvm.nativeimage.impl.ProcessPropertiesSupport;
 
-import java.io.File;
-import java.net.MalformedURLException;
-import java.net.URL;
-
 public abstract class BaseProcessPropertiesSupport implements ProcessPropertiesSupport {
-
-    @Override
-    public URL getExecutableURL() {
-        try {
-            return new File(getExecutableName()).toURI().toURL();
-        } catch (MalformedURLException ex) {
-            // This should not really happen; the file is cannonicalized, absolute, so it should
-            // always have file:// URL.
-            return null;
-        }
-    }
-
     @Override
     public int getArgumentVectorBlockSize() {
         return JavaMainWrapper.getCRuntimeArgumentBlockLength();

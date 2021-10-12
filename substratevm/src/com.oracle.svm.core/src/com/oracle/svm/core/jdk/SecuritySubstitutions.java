@@ -40,7 +40,7 @@ import java.security.ProtectionDomain;
 import java.security.Provider;
 import java.security.SecureRandom;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -49,7 +49,6 @@ import java.util.function.Predicate;
 
 import jdk.vm.ci.meta.MetaAccessProvider;
 import jdk.vm.ci.meta.ResolvedJavaField;
-import org.graalvm.collections.Pair;
 import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
@@ -135,16 +134,11 @@ final class Target_java_security_AccessController {
 
     @Substitute
     @TargetElement(onlyWith = JDK14OrLater.class)
-    @SuppressWarnings("deprecation") // deprecated starting JDK 17
     static <T> T executePrivileged(PrivilegedExceptionAction<T> action, AccessControlContext context, Class<?> caller) throws Throwable {
         if (action == null) {
             throw new NullPointerException("Null action");
         }
 
-        if (context != null && context.equals(AccessControllerUtil.NO_CONTEXT_SINGLETON)) {
-            VMError.shouldNotReachHere("Invoked AccessControlContext was replaced at build time but wasn't reinitialized at run time.");
-        }
-
         AccessControllerUtil.PrivilegedStack.push(context, caller);
         try {
             return action.run();
@@ -157,17 +151,11 @@ final class Target_java_security_AccessController {
 
     @Substitute
     @TargetElement(onlyWith = JDK14OrLater.class)
-    @SuppressWarnings("deprecation") // deprecated starting JDK 17
     static <T> T executePrivileged(PrivilegedAction<T> action, AccessControlContext context, Class<?> caller) throws Throwable {
         if (action == null) {
             throw new NullPointerException("Null action");
         }
 
-        if (context != null && context.equals(AccessControllerUtil.NO_CONTEXT_SINGLETON)) {
-            VMError.shouldNotReachHere("Invoked AccessControlContext was replaced at build time but wasn't reinitialized at run time.\n" +
-                            "This might be an indicator of improper build time initialization, or of a non-compatible JDK version.");
-        }
-
         AccessControllerUtil.PrivilegedStack.push(context, caller);
         try {
             return action.run();
@@ -180,11 +168,21 @@ final class Target_java_security_AccessController {
 
     @Substitute
     @TargetElement(onlyWith = JDK14OrLater.class)
-    @SuppressWarnings("unused")
+    @SuppressWarnings({"unused", "deprecation"})
     static AccessControlContext checkContext(AccessControlContext context, Class<?> caller) {
+
+        if (context != null && context.equals(AccessControllerUtil.NO_CONTEXT_SINGLETON)) {
+            VMError.shouldNotReachHere("Non-allowed AccessControlContext that was replaced with a blank one at build time was invoked without being reinitialized at run time.\n" +
+                            "This might be an indicator of improper build time initialization, or of a non-compatible JDK version.\n" +
+                            "In order to fix this you can either:\n" +
+                            "    * Annotate the offending context's field with @RecomputeFieldValue\n" +
+                            "    * Implement a custom runtime accessor and annotate said field with @InjectAccessors\n" +
+                            "    * If this context originates from the JDK, and it doesn't leak sensitive info, you can allow it in 'AccessControlContextFeature.duringSetup'");
+        }
+
         // check if caller is authorized to create context
         if (System.getSecurityManager() != null) {
-            throw VMError.shouldNotReachHere("Needs to be implemented when SecurityManager is supported");
+            throw VMError.unsupportedFeature("SecurityManager isn't supported");
         }
         return context;
     }
@@ -224,7 +222,7 @@ class AccessControllerUtil {
             }
         }
 
-        @SuppressWarnings("rawtypes") private static final FastThreadLocalObject<ArrayDeque> stack = FastThreadLocalFactory.createObject(ArrayDeque.class, "accStack");
+        @SuppressWarnings("rawtypes") private static final FastThreadLocalObject<ArrayDeque> stack = FastThreadLocalFactory.createObject(ArrayDeque.class, "AccessControlContextStack");
 
         @SuppressWarnings("unchecked")
         private static ArrayDeque<StackElement> getStack() {
@@ -270,7 +268,7 @@ class AccessControllerUtil {
 @SuppressWarnings({"unused"})
 class AccessControlContextFeature implements Feature {
 
-    static List<Pair<String, AccessControlContext>> allowedContexts = new ArrayList<>();
+    static Map<String, AccessControlContext> allowedContexts = new HashMap<>();
 
     static void allowContextIfExists(String className, String fieldName) {
         try {
@@ -280,7 +278,7 @@ class AccessControlContextFeature implements Feature {
             String description = className + "." + fieldName;
             try {
                 AccessControlContext acc = ReflectionUtil.readStaticField(clazz, fieldName);
-                allowedContexts.add(Pair.create(description, acc));
+                allowedContexts.put(description, acc);
             } catch (ReflectionUtil.ReflectionUtilError e) {
                 VMError.shouldNotReachHere("Following field isn't present in JDK" + JavaVersionUtil.JAVA_SPEC + ": " + description);
             }
@@ -323,7 +321,7 @@ class AccessControlContextFeature implements Feature {
 
     private static Object replaceAccessControlContext(Object obj) {
         if (obj instanceof AccessControlContext && obj != AccessControllerUtil.NO_CONTEXT_SINGLETON) {
-            if (allowedContexts.stream().anyMatch((e) -> obj.equals(e.getRight()))) {
+            if (allowedContexts.containsValue(obj)) {
                 return obj;
             } else {
                 return AccessControllerUtil.NO_CONTEXT_SINGLETON;
