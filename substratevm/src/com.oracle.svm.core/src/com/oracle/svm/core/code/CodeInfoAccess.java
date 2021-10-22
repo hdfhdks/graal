@@ -243,6 +243,7 @@ public final class CodeInfoAccess {
         public boolean isFirstFrame;
         public boolean isDone;
         public int firstValue;
+        public int successorIndex;
 
         public FrameInfoState() {
             reset();
@@ -253,6 +254,7 @@ public final class CodeInfoAccess {
             isFirstFrame = true;
             isDone = false;
             firstValue = -1;
+            successorIndex = FrameInfoDecoder.NO_SUCCESSOR_MARKER;
         }
     }
 

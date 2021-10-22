@@ -26,12 +26,18 @@ package com.oracle.svm.core.code;
 
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.Equivalence;
 import org.graalvm.compiler.core.common.LIRKind;
+import org.graalvm.compiler.core.common.NumUtil;
 import org.graalvm.compiler.core.common.util.FrequencyEncoder;
 import org.graalvm.compiler.core.common.util.TypeConversion;
 import org.graalvm.compiler.core.common.util.UnsafeArrayTypeWriter;
@@ -153,13 +159,13 @@ public class FrameInfoEncoder {
         protected int frameSliceIndex = UNCOMPRESSED_FRAME_SLICE_INDEX;
     }
 
-    private static class SourceFieldData {
+    private static class CompressedFrameData {
         final Class<?> sourceClass;
         final String sourceMethodName;
         final int sourceLineNumber;
         final boolean isSliceEnd;
 
-        SourceFieldData(Class<?> sourceClass, String sourceMethodName, int sourceLineNumber, boolean isSliceEnd) {
+        CompressedFrameData(Class<?> sourceClass, String sourceMethodName, int sourceLineNumber, boolean isSliceEnd) {
             this.sourceClass = sourceClass;
             this.sourceMethodName = sourceMethodName;
             this.sourceLineNumber = sourceLineNumber;
@@ -174,7 +180,7 @@ public class FrameInfoEncoder {
             if (o == null || getClass() != o.getClass()) {
                 return false;
             }
-            SourceFieldData that = (SourceFieldData) o;
+            CompressedFrameData that = (CompressedFrameData) o;
             return sourceLineNumber == that.sourceLineNumber && isSliceEnd == that.isSliceEnd && sourceClass.equals(that.sourceClass) && sourceMethodName.equals(that.sourceMethodName);
         }
 
@@ -208,35 +214,65 @@ public class FrameInfoEncoder {
      * original (i.e., *uncompressed*) frame encoding can coexist. To differentiate between
      * compressed and uncompressed frame slices, uncompressed frame slices start with the
      * {@link FrameInfoDecoder#UNCOMPRESSED_FRAME_SLICE_MARKER}.
+     *
+     * Compressed frames come in three forms, a *sharedFramePointer*, a *directEncoding*, and a
+     * *directEncodingWithUniqueSuccessor*. TODO add more.
      */
     private static class CompressedFrameInfoEncodingMetadata {
-        final List<SourceFieldData> framesToEncode = new ArrayList<>();
-        final EconomicMap<SourceFieldData, Integer> framesToEncodeIndexMap = EconomicMap.create(Equivalence.DEFAULT);
-        final List<List<SourceFieldData>> frameSlices = new ArrayList<>();
-        final EconomicMap<List<SourceFieldData>, Integer> frameSliceIndexMap = EconomicMap.create(Equivalence.DEFAULT);
+        final List<CompressedFrameData> framesToEncode = new ArrayList<>();
+        final EconomicMap<CompressedFrameData, Integer> framesToEncodeIndexMap = EconomicMap.create(Equivalence.DEFAULT);
+        final List<List<CompressedFrameData>> frameSlices = new ArrayList<>();
+        final EconomicMap<List<CompressedFrameData>, Integer> frameSliceIndexMap = EconomicMap.create(Equivalence.DEFAULT);
         final FrequencyEncoder<Integer> sliceFrequency = FrequencyEncoder.createEqualityEncoder();
+        final Map<CompressedFrameData, Integer> frameSliceFrequency = new HashMap<>();
+        final Map<CompressedFrameData, Set<CompressedFrameData>> frameSuccessorMap = new HashMap<>();
+        final Map<CompressedFrameData, Integer> frameMaxHeight = new HashMap<>();
 
         boolean sealed = false;
         EconomicMap<Integer, Long> encodedSliceIndexMap = EconomicMap.create(Equivalence.DEFAULT);
 
-        void addFrameSlice(FrameData data, List<SourceFieldData> slice) {
+        void addFrameSlice(FrameData data, List<CompressedFrameData> slice) {
             assert !sealed;
-            List<SourceFieldData> encodedFrameSlice = new ArrayList<>();
-            for (SourceFieldData fieldData : slice) {
-                Integer fieldDataIndex = framesToEncodeIndexMap.get(fieldData);
-                if (fieldDataIndex == null) {
-                    fieldDataIndex = framesToEncode.size();
-                    framesToEncode.add(fieldData);
-                    framesToEncodeIndexMap.put(fieldData, fieldDataIndex);
+            List<CompressedFrameData> frameSliceToEncode = new ArrayList<>();
+            for (CompressedFrameData curFrame : slice) {
+                if (!framesToEncodeIndexMap.containsKey(curFrame)) {
+                    int frameIndex = framesToEncode.size();
+                    framesToEncode.add(curFrame);
+                    framesToEncodeIndexMap.put(curFrame, frameIndex);
                 }
-                encodedFrameSlice.add(framesToEncode.get(fieldDataIndex));
+                CompressedFrameData frame = framesToEncode.get(framesToEncodeIndexMap.get(curFrame));
+                frameSliceToEncode.add(frame);
             }
-            Integer frameSliceIndex = frameSliceIndexMap.get(encodedFrameSlice);
-            if (frameSliceIndex == null) {
-                frameSliceIndex = frameSlices.size();
-                frameSlices.add(encodedFrameSlice);
-                frameSliceIndexMap.put(encodedFrameSlice, frameSliceIndex);
+            if (!frameSliceIndexMap.containsKey(frameSliceToEncode)) {
+                int frameSliceIndex = frameSlices.size();
+                frameSlices.add(frameSliceToEncode);
+                frameSliceIndexMap.put(frameSliceToEncode, frameSliceIndex);
+                /*
+                 * Since this is a new slice, the frameSliceFrequency, frameSuccessorMap, and
+                 * frameMaxHeight metadata must be updated.
+                 */
+                CompressedFrameData prevFrame = null;
+                int height = 0;
+                for (CompressedFrameData frame : frameSliceToEncode) {
+                    frameSliceFrequency.compute(frame, (k, v) -> (v == null) ? 1 : v + 1);
+                    if (prevFrame != null) {
+                        frameSuccessorMap.compute(prevFrame, (k, v) -> {
+                            Set<CompressedFrameData> callers;
+                            if (v == null) {
+                                callers = new HashSet<>();
+                            } else {
+                                callers = v;
+                            }
+                            callers.add(frame);
+                            return callers;
+                        });
+                    }
+                    prevFrame = frame;
+                    frameMaxHeight.put(frame, Integer.max(height, frameMaxHeight.getOrDefault(frame, 0)));
+                    height++;
+                }
             }
+            Integer frameSliceIndex = frameSliceIndexMap.get(frameSliceToEncode);
             data.frameSliceIndex = frameSliceIndex;
             sliceFrequency.addObject(frameSliceIndex);
         }
@@ -244,22 +280,115 @@ public class FrameInfoEncoder {
         void encodeCompressedData(UnsafeArrayTypeWriter encodingBuffer, Encoders encoders) {
             assert !sealed;
             sealed = true;
+
+            /*
+             * First encode all frames which are used within multiple slices.
+             */
+            EconomicMap<CompressedFrameData, Long> sharedEncodedFrameIndexMap = EconomicMap.create(Equivalence.DEFAULT);
+            List<CompressedFrameData> sharedFrames = framesToEncode.stream().filter((f) -> frameSliceFrequency.get(f) > 1).sorted(
+                            /*
+                             * We want frames which are referenced frequently to be encoded first.
+                             * If two frames have the same frequency, then the frame with the
+                             * greater height is encoded first; this allows a shared frame
+                             * references to be directly encoded.
+                             */
+                            (f1, f2) -> {
+                                int result = -Integer.compare(frameSliceFrequency.get(f1), frameSliceFrequency.get(f2));
+                                if (result == 0) {
+                                    result = -Integer.compare(frameMaxHeight.get(f1), frameMaxHeight.get(f2));
+                                }
+                                return result;
+                            }).collect(Collectors.toList());
+            for (CompressedFrameData frame : sharedFrames) {
+                assert !sharedEncodedFrameIndexMap.containsKey(frame);
+                sharedEncodedFrameIndexMap.put(frame, encodingBuffer.getBytesWritten());
+
+                // Determining the frame's unique successor index (if any).
+                int uniqueSuccessorIndex = FrameInfoDecoder.NO_SUCCESSOR_MARKER;
+                CompressedFrameData uniqueSuccessor = getUniqueSuccessor(frame);
+                if (uniqueSuccessor != null) {
+                    // The unique successor is always encoded first due to sorting by height.
+                    assert sharedEncodedFrameIndexMap.containsKey(uniqueSuccessor);
+                    uniqueSuccessorIndex = NumUtil.safeToInt(sharedEncodedFrameIndexMap.get(uniqueSuccessor));
+                }
+                encodeCompressedFrame(encodingBuffer, encoders, frame, uniqueSuccessorIndex);
+            }
+
+            /*
+             * Next encode all frame slices. Frames which are shared by multiple slices will be
+             * represented by pointers, while frame unique to this frame slice will be directly
+             * encoded here
+             */
             Integer[] sliceOrder = sliceFrequency.encodeAll(new Integer[sliceFrequency.getLength()]);
             for (Integer sliceIdx : sliceOrder) {
                 assert !encodedSliceIndexMap.containsKey(sliceIdx);
-                encodedSliceIndexMap.put(sliceIdx, encodingBuffer.getBytesWritten());
 
-                List<SourceFieldData> slice = frameSlices.get(sliceIdx);
-                for (SourceFieldData fieldData : slice) {
-                    int classIndex = encoders.sourceClasses.getIndex(fieldData.sourceClass);
-                    int methodIndex = encoders.sourceMethodNames.getIndex(fieldData.sourceMethodName);
-
-                    VMError.guarantee(classIndex != FrameInfoDecoder.UNCOMPRESSED_FRAME_SLICE_MARKER);
-
-                    encodingBuffer.putSV(classIndex);
-                    encodingBuffer.putSV(methodIndex);
-                    encodingBuffer.putSV(encodeCompressedSourceLineNumber(fieldData.sourceLineNumber, fieldData.isSliceEnd));
+                List<CompressedFrameData> slice = frameSlices.get(sliceIdx);
+                assert slice.size() > 0;
+                /*
+                 * If there does not need to be any unique slice state, i.e., all of the slice's
+                 * state is walkable within the shared frame state, then the slice's initial shared
+                 * frame can be directly pointed to.
+                 */
+                boolean directlyPointToSharedFrame = slice.stream().allMatch(frame -> {
+                    Set<CompressedFrameData> frameSuccessors = frameSuccessorMap.get(frame);
+                    return sharedEncodedFrameIndexMap.containsKey(frame) && (frameSuccessors == null || frameSuccessors.size() == 1);
+                });
+                if (directlyPointToSharedFrame) {
+                    CompressedFrameData frame = slice.get(0);
+                    assert sharedEncodedFrameIndexMap.containsKey(frame);
+                    encodedSliceIndexMap.put(sliceIdx, sharedEncodedFrameIndexMap.get(frame));
+                } else {
+                    /* Need to encode unique frames and pointers to shared frames. */
+                    encodedSliceIndexMap.put(sliceIdx, encodingBuffer.getBytesWritten());
+                    CompressedFrameData prevFrame = null;
+                    boolean prevShared = false;
+                    for (CompressedFrameData frame : slice) {
+                        boolean sharedFrame = sharedEncodedFrameIndexMap.containsKey(frame);
+                        if (prevShared && getUniqueSuccessor(prevFrame) != null) {
+                            /*
+                             * This shared frame is directly pointed for by the prior frame's shared
+                             * frame successor. Therefore, we don't need to encode anything here.
+                             */
+                        } else {
+                            if (sharedFrame) {
+                                // Encode pointer to shared frame
+                                int framePointer = NumUtil.safeToInt(sharedEncodedFrameIndexMap.get(frame));
+                                encodingBuffer.putSV(encodeCompressedFirstEntry(framePointer, false));
+                            } else {
+                                // Encode unique frame
+                                encodeCompressedFrame(encodingBuffer, encoders, frame, FrameInfoDecoder.NO_SUCCESSOR_MARKER);
+                            }
+                        }
+                        prevShared = sharedFrame;
+                        prevFrame = frame;
+                    }
                 }
+            }
+        }
+
+        /**
+         * @return frame's single successor, or {@code null} if the frame has either 0 or >1
+         *         successor.
+         */
+        private CompressedFrameData getUniqueSuccessor(CompressedFrameData frame) {
+            Set<CompressedFrameData> frameSuccessors = frameSuccessorMap.get(frame);
+            if (frameSuccessors != null && frameSuccessors.size() == 1) {
+                return frameSuccessors.iterator().next();
+            }
+            return null;
+        }
+
+        private static void encodeCompressedFrame(UnsafeArrayTypeWriter encodingBuffer, Encoders encoders, CompressedFrameData frame, int successorIndex) {
+            int classIndex = encoders.sourceClasses.getIndex(frame.sourceClass);
+            int methodIndex = encoders.sourceMethodNames.getIndex(frame.sourceMethodName);
+
+            encodingBuffer.putSV(encodeCompressedFirstEntry(classIndex, true));
+            boolean hasSingleSuccessor = successorIndex != FrameInfoDecoder.NO_SUCCESSOR_MARKER;
+            encodingBuffer.putSV(encodeCompressedMethodIndex(methodIndex, hasSingleSuccessor));
+            encodingBuffer.putSV(encodeCompressedSourceLineNumber(frame.sourceLineNumber, frame.isSliceEnd));
+            if (hasSingleSuccessor) {
+                encodingBuffer.putSV(successorIndex);
             }
         }
 
@@ -276,7 +405,7 @@ public class FrameInfoEncoder {
          */
         boolean writeFrameVerificationInfo(FrameData data, Encoders encoders) {
             int curIdx = 0;
-            List<SourceFieldData> slice = frameSlices.get(data.frameSliceIndex);
+            List<CompressedFrameData> slice = frameSlices.get(data.frameSliceIndex);
             for (FrameInfoQueryResult cur = data.frame; cur != null; cur = cur.caller) {
                 cur.encodedBci = FrameInfoDecoder.NO_LOCAL_INFO_BCI;
                 assert cur == data.frame || !cur.isDeoptEntry : "Deoptimization entry information for caller frames is not persisted";
@@ -284,8 +413,8 @@ public class FrameInfoEncoder {
                 cur.sourceClassIndex = encoders.sourceClasses.getIndex(cur.sourceClass);
                 cur.sourceMethodNameIndex = encoders.sourceMethodNames.getIndex(cur.sourceMethodName);
                 boolean isSliceEnd = cur.caller == null;
-                SourceFieldData fieldData = new SourceFieldData(cur.sourceClass, cur.sourceMethodName, cur.sourceLineNumber, isSliceEnd);
-                assert fieldData.equals(slice.get(curIdx));
+                CompressedFrameData frame = new CompressedFrameData(cur.sourceClass, cur.sourceMethodName, cur.sourceLineNumber, isSliceEnd);
+                assert frame.equals(slice.get(curIdx));
                 curIdx++;
             }
             assert frameSlices.get(data.frameSliceIndex).size() == curIdx;
@@ -322,7 +451,7 @@ public class FrameInfoEncoder {
         data.frame = addFrame(data, debugInfo.frame(), customization.isDeoptEntry(method, infopoint), includeLocalValues);
 
         if (encodeSourceReferences) {
-            List<SourceFieldData> frameSlice = useCompressedEncoding ? new ArrayList<>() : null;
+            List<CompressedFrameData> frameSlice = useCompressedEncoding ? new ArrayList<>() : null;
             BytecodeFrame bytecodeFrame = data.debugInfo.frame();
             for (FrameInfoQueryResult resultFrame = data.frame; resultFrame != null; resultFrame = resultFrame.caller) {
                 assert bytecodeFrame != null;
@@ -339,8 +468,8 @@ public class FrameInfoEncoder {
                     assert !resultFrame.hasLocalValueInfo();
                     final boolean isSliceEnd = resultFrame.caller == null;
                     final int sourceLineNumber = resultFrame.sourceLineNumber;
-                    SourceFieldData fieldData = new SourceFieldData(sourceClass, sourceMethodName, sourceLineNumber, isSliceEnd);
-                    frameSlice.add(fieldData);
+                    CompressedFrameData frame = new CompressedFrameData(sourceClass, sourceMethodName, sourceLineNumber, isSliceEnd);
+                    frameSlice.add(frame);
                 }
 
                 bytecodeFrame = bytecodeFrame.caller();
@@ -820,6 +949,33 @@ public class FrameInfoEncoder {
      */
     public static long encodeBci(int bci, boolean duringCall, boolean rethrowException) {
         return (((long) bci) << FrameInfoDecoder.BCI_SHIFT) | (duringCall ? FrameInfoDecoder.DURING_CALL_MASK : 0) | (rethrowException ? FrameInfoDecoder.RETHROW_EXCEPTION_MASK : 0);
+    }
+
+    /**
+     * Encode first value within a compressed frame. This may be either the classIndex, or a pointer
+     * to a shared frame.
+     *
+     * @param isClassIndex whether this value is a class index or a pointer
+     */
+    private static int encodeCompressedFirstEntry(int value, boolean isClassIndex) {
+        VMError.guarantee(value >= 0);
+        int encodedValue = isClassIndex ? value : -(value + FrameInfoDecoder.COMPRESSED_FRAME_POINTER_ADDEND);
+
+        VMError.guarantee(encodedValue != FrameInfoDecoder.UNCOMPRESSED_FRAME_SLICE_MARKER);
+        return encodedValue;
+    }
+
+    /**
+     * Encode method index within a compressed frame. If this frame also has a shared frame
+     * successor, then the method index is encoded as a negative value.
+     */
+    private static int encodeCompressedMethodIndex(int methodIndex, boolean hasSharedFrameSuccessor) {
+        VMError.guarantee(methodIndex >= 0);
+        if (!hasSharedFrameSuccessor) {
+            return methodIndex;
+        } else {
+            return -(methodIndex + FrameInfoDecoder.COMPRESSED_UNIQUE_SUCCESSOR_ADDEND);
+        }
     }
 
     /**
